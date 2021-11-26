@@ -7,6 +7,7 @@
 #include <Average_Pool_2D.hpp>
 #include <Batch_To_Space.hpp>
 #include <Bidirectional_Sequence_RNN.hpp>
+#include <Box_With_NMS_Limit.hpp>
 #include <Cast.hpp>
 #include <Channel_Shuffle.hpp>
 #include <Concat.hpp>

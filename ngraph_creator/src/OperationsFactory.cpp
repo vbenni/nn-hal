@@ -31,6 +31,8 @@ std::shared_ptr<OperationsBase> OperationsFactory::getOperation(
             return std::make_shared<Batch_To_Space>(operationIndex);
         case OperationType::BIDIRECTIONAL_SEQUENCE_RNN:
             return std::make_shared<Bidirectional_Sequence_RNN>(operationIndex);
+        case OperationType::BOX_WITH_NMS_LIMIT:
+            return std::make_shared<Box_With_NMS_Limit>(operationIndex);
         case OperationType::CAST:
             return std::make_shared<Cast>(operationIndex);
         case OperationType::CHANNEL_SHUFFLE:
