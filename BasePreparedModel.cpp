@@ -124,7 +124,7 @@ Return<ErrorStatus> executeBase(const Request& request, MeasureTiming measure,
 template <typename T_IExecutionCallback>
 void asyncExecute(const Request& request, MeasureTiming measure, BasePreparedModel* preparedModel,
                   time_point driverStart, const sp<T_IExecutionCallback>& callback) {
-    ALOGV("Entering %s", __func__);
+    ALOGV("Entering -----------------------------------%s", __func__);
     auto modelInfo = preparedModel->getModelInfo();
     auto plugin = preparedModel->getPlugin();
     auto ngraphNw = preparedModel->getNgraphNwCreator();
@@ -318,8 +318,9 @@ void asyncExecute(const Request& request, MeasureTiming measure, BasePreparedMod
     ALOGV("Exiting %s", __func__);
 }
 
-static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynchronouslyBase(
-    const Request& request, MeasureTiming measure, BasePreparedModel* preparedModel,
+//static time_point avg_infer_time, avg_memcpy_time;
+static std::tuple<V1_3::ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynchronouslyBase(
+    const V1_3::Request& request, MeasureTiming measure, BasePreparedModel* preparedModel,
     time_point driverStart) {
     ALOGV("Entering %s", __func__);
     auto modelInfo = preparedModel->getModelInfo();
@@ -328,15 +329,17 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
     time_point driverEnd, deviceStart, deviceEnd;
     std::vector<RunTimePoolInfo> requestPoolInfos;
     auto errorStatus = modelInfo->setRunTimePoolInfosFromHidlMemories(request.pools);
-    if (errorStatus != ErrorStatus::NONE) {
+    if (errorStatus != V1_3::ErrorStatus::NONE) {
         ALOGE("Failed to set runtime pool info from HIDL memories");
-        return {ErrorStatus::GENERAL_FAILURE, {}, kNoTiming};
+        return {V1_3::ErrorStatus::GENERAL_FAILURE, {}, kNoTiming};
     }
 
+    time_point tstartInMemcopy, tstopInMemcopy;
+    tstartInMemcopy = now();
     for (size_t i = 0; i < request.inputs.size(); i++) {
         uint32_t len;
         auto inIndex = modelInfo->getModelInputIndex(i);
-        void* srcPtr = modelInfo->getBlobFromMemoryPoolIn(request, i, len);
+        void* srcPtr = modelInfo->getBlobFromMemoryPoolIn(convertToV1_0(request), i, len);
 
         const std::string& inputNodeName = ngraphNw->getNodeName(inIndex);
         if (inputNodeName == "") {
@@ -395,18 +398,29 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
                 break;
         }
     }
-
+    tstopInMemcopy = now();
+    ALOGV("---------------Input Memcpy time %d-----------------", uint64_t(microsecondsDuration(tstopInMemcopy, tstartInMemcopy)));
     ALOGD("%s Run", __func__);
 
+    //Vijeet
+    time_point tstart,tstop,tdeviceStart,tdeviceEnd,tdriverStart,tdriverEnd;
+    tdriverStart = driverStart;
     if (measure == MeasureTiming::YES) deviceStart = now();
+    tdeviceStart = now();
     try {
+        ALOGV("Start ---------------Inference-----------------");
+        tstart = now();
         plugin->infer();
+        tstop = now();
+        ALOGV("Exiting ---------------Inference time %d-----------------", uint64_t(microsecondsDuration(tstop, tstart)));
     } catch (const std::exception& ex) {
         ALOGE("%s Exception !!! %s", __func__, ex.what());
-        return {ErrorStatus::GENERAL_FAILURE, {}, kNoTiming};
+        return {V1_3::ErrorStatus::GENERAL_FAILURE, {}, kNoTiming};
     }
     if (measure == MeasureTiming::YES) deviceEnd = now();
+    tdeviceEnd = now();
 
+    tstart = now();
     for (size_t i = 0; i < request.outputs.size(); i++) {
         auto outIndex = modelInfo->getModelOutputIndex(i);
         ALOGI("OutputIndex: %d", outIndex);
@@ -420,7 +434,7 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
         auto operandType = modelInfo->getOperandType(outIndex);
         uint32_t actualLength = srcBlob.get_byte_size();
         uint32_t expectedLength = 0;
-        void* destPtr = modelInfo->getBlobFromMemoryPoolOut(request, i, expectedLength);
+        void* destPtr = modelInfo->getBlobFromMemoryPoolOut(convertToV1_0(request), i, expectedLength);
         auto outputBlobDims = srcBlob.get_shape();
 
         bool outputSizeMismatch = false;
@@ -442,7 +456,7 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
             ALOGE(
                 "Mismatch in actual and exepcted output sizes. Return with "
                 "OUTPUT_INSUFFICIENT_SIZE error");
-            return {ErrorStatus::OUTPUT_INSUFFICIENT_SIZE, modelInfo->getOutputShapes(), kNoTiming};
+            return {V1_3::ErrorStatus::OUTPUT_INSUFFICIENT_SIZE, modelInfo->getOutputShapes(), kNoTiming};
         }
 
         switch (operandType) {
@@ -493,34 +507,37 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
         }
     }
 
+    tstop = now();
+    ALOGV("---------------Output Memcpy time %d-----------------",  uint64_t(microsecondsDuration(tstop, tstart)));
     if (!modelInfo->updateRequestPoolInfos()) {
         ALOGE("Failed to update the request pool infos");
-        return {ErrorStatus::GENERAL_FAILURE, {}, kNoTiming};
+        return {V1_3::ErrorStatus::GENERAL_FAILURE, {}, kNoTiming};
     }
 
+    tdriverEnd = now();
     if (measure == MeasureTiming::YES) {
         driverEnd = now();
         Timing timing = {.timeOnDevice = uint64_t(microsecondsDuration(deviceEnd, deviceStart)),
                          .timeInDriver = uint64_t(microsecondsDuration(driverEnd, driverStart))};
-        return {ErrorStatus::NONE, modelInfo->getOutputShapes(), timing};
+        return {V1_3::ErrorStatus::NONE, modelInfo->getOutputShapes(), timing};
     }
+    ALOGV("timeOnDevice = %d ********************** timeInDriver = %d",  uint64_t(microsecondsDuration(tdeviceEnd, tdeviceStart)), uint64_t(microsecondsDuration(tdriverEnd, tdriverStart)));
     ALOGV("Exiting %s", __func__);
-    return {ErrorStatus::NONE, modelInfo->getOutputShapes(), kNoTiming};
+    return {V1_3::ErrorStatus::NONE, modelInfo->getOutputShapes(), kNoTiming};
 }
 
 Return<void> BasePreparedModel::executeSynchronously(const Request& request, MeasureTiming measure,
                                                      executeSynchronously_cb cb) {
-    ALOGV("Entering %s", __func__);
+    ALOGV("Entering -----------------%s", __func__);
     time_point driverStart;
     if (measure == MeasureTiming::YES) driverStart = now();
-
     if (!validateRequest(request, convertToV1_2(mModelInfo->getModel()))) {
         cb(ErrorStatus::INVALID_ARGUMENT, {}, kNoTiming);
         return Void();
     }
     auto [status, outputShapes, timing] =
-        executeSynchronouslyBase(request, measure, this, driverStart);
-    cb(status, std::move(outputShapes), timing);
+        executeSynchronouslyBase(convertToV1_3(request), measure, this, driverStart);
+    cb(convertToV1_0(status), std::move(outputShapes), timing);
     ALOGV("Exiting %s", __func__);
     return Void();
 }
@@ -530,18 +547,47 @@ Return<void> BasePreparedModel::executeSynchronously_1_3(const V1_3::Request& re
                                                          const V1_3::OptionalTimePoint&,
                                                          const V1_3::OptionalTimeoutDuration&,
                                                          executeSynchronously_1_3_cb cb) {
-    ALOGV("Entering %s", __func__);
+    ALOGV("Entering ----------------------%s", __func__);
     time_point driverStart;
+    time_point tStart,tStop;
+    tStart = now();
     if (measure == MeasureTiming::YES) driverStart = now();
+    driverStart = now();
+    
+    // time_point tRequeststart = now();
+    // V1_0::Request v1Request = convertToV1_0(request);
+    // time_point tRequeststop = now();
+    // ALOGV("Request ---------------Request Conversion time %d-----------------", uint64_t(microsecondsDuration(tRequeststop, tRequeststart)));
 
-    if (!validateRequest(convertToV1_0(request), convertToV1_2(mModelInfo->getModel()))) {
+    // time_point tgetModelstart = now();
+    // auto _model = mModelInfo->getModel();
+    // time_point tgetModelstop = now();
+    // ALOGV("Get Model ---------------Get Model time %d-----------------", uint64_t(microsecondsDuration(tgetModelstop, tgetModelstart)));
+
+    // time_point tModelconvstart = now();
+    // auto v1_2Model = convertToV1_2(_model);
+    // time_point tModelconvstop = now();
+    // ALOGV("Model Conv ---------------Model Conv time %d-----------------", uint64_t(microsecondsDuration(tModelconvstop, tModelconvstart)));
+
+    time_point tstart = now();
+    //if (!validateRequest(convertToV1_0(request), convertToV1_2(mModelInfo->getModel()))) {
+    if (!validateRequest(request,mModelInfo->getModel()) {
         cb(V1_3::ErrorStatus::INVALID_ARGUMENT, {}, kNoTiming);
         return Void();
     }
+    time_point tstop = now();
+    ALOGV("validateRequest ---------------validateRequest time %d-----------------", uint64_t(microsecondsDuration(tstop, tstart)));
+
     auto [status, outputShapes, timing] =
-        executeSynchronouslyBase(convertToV1_0(request), measure, this, driverStart);
+        executeSynchronouslyBase(request, measure, this, driverStart);
+
+    time_point tcbstart = now();
     cb(convertToV1_3(status), std::move(outputShapes), timing);
-    ALOGV("Exiting %s", __func__);
+    time_point tcbstop = now();
+    ALOGV("cb ---------------cb time %d-----------------", uint64_t(microsecondsDuration(tcbstop, tcbstart)));
+
+    tStop = now();
+    ALOGV("**********************Exiting ---------------%s time %d-----------------*************************", __func__, uint64_t(microsecondsDuration(tStop, tStart)));
     return Void();
 }
 
