@@ -321,6 +321,10 @@ void asyncExecute(const Request& request, MeasureTiming measure, BasePreparedMod
     ALOGV("Exiting %s", __func__);
 }
 
+static float avg_input_cp;
+static float avg_output_cp;
+static float avg_infer;
+static float count;
 static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynchronouslyBase(
     const Request& request, MeasureTiming measure, BasePreparedModel* preparedModel,
     time_point driverStart) {
@@ -335,7 +339,11 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
         ALOGE("Failed to set runtime pool info from HIDL memories");
         return {ErrorStatus::GENERAL_FAILURE, {}, kNoTiming};
     }
-
+     
+    //Measure Input/output copy 
+    time_point tstartInMemcopy, tstopInMemcopy;
+    time_point tstart_memcpy,tstop_memcpy;
+    tstartInMemcopy = now();
     for (size_t i = 0; i < request.inputs.size(); i++) {
         uint32_t len;
         auto inIndex = modelInfo->getModelInputIndex(i);
@@ -346,70 +354,117 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
             ALOGD("Ignorning input at index(%d), since it is invalid", inIndex);
             continue;
         }
-        ALOGD("Input index: %d layername : %s", inIndex, inputNodeName.c_str());
+        ALOGD("--------------Input index: %d layername : %s----------", inIndex, inputNodeName.c_str());
         auto destBlob = plugin->getInputBlob(i);
         auto inOperandType = modelInfo->getOperandType(inIndex);
         switch (inOperandType) {
             case OperandType::TENSOR_INT32: {
                 int32_t* dest = destBlob.data<int32_t>();
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)dest, (uint8_t*)srcPtr, len);
+                tstop_memcpy = now();
+                ALOGV(" ---------------Input type TENSOR_INT32-----------------");
                 break;
             }
             case OperandType::TENSOR_FLOAT16: {
                 ov::float16* dest = destBlob.data<ov::float16>();
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)dest, (uint8_t*)srcPtr, len);
+                tstop_memcpy = now();
+                ALOGV(" ---------------Input type TENSOR_FLOAT16-----------------");
                 break;
             }
             case OperandType::TENSOR_FLOAT32: {
                 uint8_t* dest = (uint8_t*)destBlob.data<float>();
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)dest, (uint8_t*)srcPtr, len);
+                tstop_memcpy = now();
+                ALOGV(" ---------------Input type TENSOR_FLOAT32-----------------");
                 break;
             }
             case OperandType::TENSOR_BOOL8: {
                 uint8_t* dest = (uint8_t*)destBlob.data<bool>();
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)dest, (uint8_t*)srcPtr, len);
+                tstop_memcpy = now();
+                ALOGV(" ---------------Input type TENSOR_INT32-----------------");
                 break;
             }
             case OperandType::TENSOR_QUANT8_ASYMM: {
                 uint8_t* dest = (uint8_t*)destBlob.data<uint8_t>();
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)dest, (uint8_t*)srcPtr, len);
+                tstop_memcpy = now();
+                ALOGV(" ---------------Input type TENSOR_QUANT8_ASYMM-----------------");
                 break;
             }
             case OperandType::TENSOR_QUANT8_SYMM:
             case OperandType::TENSOR_QUANT8_SYMM_PER_CHANNEL:
             case OperandType::TENSOR_QUANT8_ASYMM_SIGNED: {
                 int8_t* dest = (int8_t*)destBlob.data<int8_t>();
+                tstart_memcpy = now();
                 std::memcpy((int8_t*)dest, (int8_t*)srcPtr, len);
+                tstop_memcpy = now();
+                ALOGV(" ---------------Input type TENSOR_QUANT8_ASYMM_SIGNED-----------------");
                 break;
             }
             case OperandType::TENSOR_QUANT16_SYMM: {
                 uint8_t* dest = (uint8_t*)destBlob.data<int16_t>();
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)dest, (uint8_t*)srcPtr, len);
+                tstop_memcpy = now();
+                ALOGV(" ---------------Input type TENSOR_QUANT16_SYMM-----------------");
                 break;
             }
             case OperandType::TENSOR_QUANT16_ASYMM: {
                 uint8_t* dest = (uint8_t*)destBlob.data<uint16_t>();
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)dest, (uint8_t*)srcPtr, len);
+                tstop_memcpy = now();
+                ALOGV(" ---------------Input type TENSOR_QUANT16_ASYMM-----------------");
                 break;
             }
             default:
                 uint8_t* dest = (uint8_t*)destBlob.data<uint8_t>();
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)dest, (uint8_t*)srcPtr, len);
+                tstop_memcpy = now();
+                ALOGV(" ---------------Input type defualt-----------------");
                 break;
         }
+        ALOGV("-------------Layer %d len=%d inputs.size()=%d - Input Memcpy time %d-----------------", i,len,request.inputs.size(), uint64_t(microsecondsDuration(tstop_memcpy, tstart_memcpy)));
     }
-
+    tstopInMemcopy = now();
+    float total_time = uint64_t(microsecondsDuration(tstopInMemcopy, tstartInMemcopy))/1000.0;
+    ALOGV("---------------Input Memcpy time %d-----------------", uint64_t(microsecondsDuration(tstopInMemcopy, tstartInMemcopy)));
+    count = count+1;
+    avg_input_cp += total_time;
+    float avg_time = (avg_input_cp)/count;
+    ALOGV("---------------Input Memcpy Avg time %f %f %f-----------------",avg_time,count,avg_input_cp);
     ALOGD("%s Run", __func__);
 
+    //Measure inference
+    time_point tstart,tstop;//,tdeviceStart,tdeviceEnd,tdriverStart,tdriverEnd;
+    //tdriverStart = driverStart;
     if (measure == MeasureTiming::YES) deviceStart = now();
     try {
+        //ALOGV("Start ---------------Inference-----------------");
+        tstart = now();
         plugin->infer();
+        tstop = now();
+        ALOGV("Exiting ---------------Inference time %d-----------------", uint64_t(microsecondsDuration(tstop, tstart)));
+        total_time = uint64_t(microsecondsDuration(tstop, tstart))/1000.0;
+        avg_infer += total_time;
+        avg_time = (avg_infer)/count;
+        ALOGV("---------------Inference Avg time %f-----------------",avg_time);
     } catch (const std::exception& ex) {
         ALOGE("%s Exception !!! %s", __func__, ex.what());
         return {ErrorStatus::GENERAL_FAILURE, {}, kNoTiming};
     }
     if (measure == MeasureTiming::YES) deviceEnd = now();
 
+    //Measure output buffer copy
+    tstart = now();
     for (size_t i = 0; i < request.outputs.size(); i++) {
         auto outIndex = modelInfo->getModelOutputIndex(i);
         ALOGI("OutputIndex: %d", outIndex);
@@ -418,7 +473,7 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
             ALOGD("Ignorning output at index(%d), since it is invalid", outIndex);
             continue;
         }
-        ALOGD("Output index: %d layername : %s", outIndex, outputNodeName.c_str());
+        ALOGD("--------Output index: %d layername : %s------------", outIndex, outputNodeName.c_str());
         auto srcBlob = plugin->getOutputBlob(i);
         auto operandType = modelInfo->getOperandType(outIndex);
         uint32_t actualLength = srcBlob.get_byte_size();
@@ -450,51 +505,85 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
 
         switch (operandType) {
             case OperandType::TENSOR_INT32:
+                tstart_memcpy = now(); 
                 std::memcpy((uint8_t*)destPtr, (uint8_t*)srcBlob.data<int32_t>(),
                             srcBlob.get_byte_size());
+                tstop_memcpy = now();
+                ALOGV(" ---------------Output type TENSOR_INT32-----------------");
                 break;
             case OperandType::TENSOR_FLOAT32: {
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)destPtr, (uint8_t*)srcBlob.data<float>(),
                             srcBlob.get_byte_size());
+                tstop_memcpy = now();
+                ALOGV(" ---------------Output type TENSOR_FLOAT32-----------------");
                 break;
             }
             case OperandType::TENSOR_BOOL8: {
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)destPtr, (uint8_t*)srcBlob.data<bool>(),
                             srcBlob.get_byte_size());
+                tstop_memcpy = now();
+                ALOGV(" ---------------Output type TENSOR_BOOL8-----------------");
                 break;
             }
             case OperandType::TENSOR_QUANT8_ASYMM: {
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)destPtr, (uint8_t*)srcBlob.data<uint8_t>(),
                             srcBlob.get_byte_size());
+                tstop_memcpy = now();
+                ALOGV(" ---------------Output type TENSOR_QUANT8_ASYMM-----------------");
                 break;
             }
             case OperandType::TENSOR_QUANT8_SYMM:
             case OperandType::TENSOR_QUANT8_SYMM_PER_CHANNEL:
             case OperandType::TENSOR_QUANT8_ASYMM_SIGNED: {
+                tstart_memcpy = now();
                 std::memcpy((int8_t*)destPtr, (int8_t*)srcBlob.data<int8_t>(),
                             srcBlob.get_byte_size());
+                tstop_memcpy = now();
+                ALOGV(" ---------------Output type TENSOR_QUANT8-----------------");
                 break;
             }
             case OperandType::TENSOR_FLOAT16: {
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)destPtr, (uint8_t*)srcBlob.data<ov::float16>(),
                             srcBlob.get_byte_size());
+                tstop_memcpy = now();
+                ALOGV(" ---------------Output type TENSOR_FLOAT16-----------------");
                 break;
             }
             case OperandType::TENSOR_QUANT16_SYMM: {
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)destPtr, (uint8_t*)srcBlob.data<int16_t>(),
                             srcBlob.get_byte_size());
+                tstop_memcpy = now();
+                ALOGV(" ---------------Output type TENSOR_QUANT16_SYMM-----------------");
                 break;
             }
             case OperandType::TENSOR_QUANT16_ASYMM: {
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)destPtr, (uint8_t*)srcBlob.data<uint16_t>(),
                             srcBlob.get_byte_size());
+                tstop_memcpy = now();
+                ALOGV(" ---------------Output type TENSOR_QUANT16_ASYMM-----------------");
                 break;
             }
             default:
+                tstart_memcpy = now();
                 std::memcpy((uint8_t*)destPtr, srcBlob.data<uint8_t>(), srcBlob.get_byte_size());
+                tstop_memcpy = now();
+                ALOGV(" ---------------Output type default-----------------");
                 break;
         }
+        ALOGV("-------------Layer %d len=%d outputs.size=%d - Output Memcpy time %d -----------------", i, srcBlob.get_byte_size(), request.outputs.size(), uint64_t(microsecondsDuration(tstop_memcpy, tstart_memcpy)));
     }
+    tstop = now();
+    ALOGV("---------------Output Memcpy time %d-----------------",  uint64_t(microsecondsDuration(tstop, tstart)));
+    total_time = uint64_t(microsecondsDuration(tstop, tstart))/1000.0;
+    avg_output_cp += total_time;
+    avg_time = (avg_output_cp)/count;
+    ALOGV("---------------Output Memcpy Avg time %f-----------------",avg_time);
 
     if (!modelInfo->updateRequestPoolInfos()) {
         ALOGE("Failed to update the request pool infos");

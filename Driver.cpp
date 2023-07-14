@@ -294,6 +294,7 @@ Return<void> Driver::getNumberOfCacheFilesNeeded(getNumberOfCacheFilesNeeded_cb 
     ALOGV("Entering %s", __func__);
     // Set both numbers to be 0 for cache not supported.
     cb(ErrorStatus::NONE, /*numModelCache=*/0, /*numDataCache=*/0);
+    ALOGV("Exiting %s", __func__);
     return Void();
 }
 
